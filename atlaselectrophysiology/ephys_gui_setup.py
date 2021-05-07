@@ -199,7 +199,7 @@ class Setup():
 
         # FILTER UNITS MENU BAR
         # Define unit filtering options
-        all_units = QtGui.QAction('All', self, checkable=True, checked=True)
+        all_units = QtGui.QAction('All', self, checkable=True, checked=False)
         all_units.triggered.connect(lambda: self.filter_unit_pressed('all'))
         good_units = QtGui.QAction('KS good', self, checkable=True, checked=False)
         good_units.triggered.connect(lambda: self.filter_unit_pressed('KS good'))
@@ -207,6 +207,9 @@ class Setup():
         mua_units.triggered.connect(lambda: self.filter_unit_pressed('KS mua'))
         ibl_units = QtGui.QAction('IBL good', self, checkable=True, checked=False)
         ibl_units.triggered.connect(lambda: self.filter_unit_pressed('IBL good'))
+        # XXX: Adam
+        phy_units = QtGui.QAction('Phy good', self, checkable=True, checked=True)
+        phy_units.triggered.connect(lambda: self.filter_unit_pressed('Phy good'))
         # Initialise with all units being shown
         self.unit_init = all_units
 
@@ -223,6 +226,8 @@ class Setup():
         unit_filter_options_group.addAction(mua_units)
         unit_filter_options.addAction(ibl_units)
         unit_filter_options_group.addAction(ibl_units)
+        unit_filter_options.addAction(phy_units)
+        unit_filter_options_group.addAction(phy_units)
 
         # FIT OPTIONS MENU BAR
         # Define all possible keyboard shortcut interactions for GUI

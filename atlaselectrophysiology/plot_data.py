@@ -7,6 +7,7 @@ from brainbox.population.decode import xcorr
 from brainbox.task import passive
 import scipy
 from PyQt5 import QtGui
+import os
 
 N_BNK = 4
 BNK_SIZE = 10
@@ -123,6 +124,15 @@ class PlotData:
                 clust = np.where(self.clusters.metrics.ks2_label == 'good')
                 self.spike_idx = np.where(np.isin(self.spikes['clusters'], clust))[0]
 
+        # XXX: adam
+        elif type == 'Phy good':
+            phy_dir = os.path.join(os.path.dirname(self.alf_path), 'ks_matlab')
+            # load and parse the tsv to get the indices of good clusters
+            group_file = open(os.path.join(phy_dir, 'cluster_group.tsv'))
+            cluster_group = np.loadtxt(group_file, dtype=str, delimiter='\t', skiprows=1)
+            clust = cluster_group[cluster_group[:, 1] == 'good', 0].astype(np.int32)
+            self.spike_idx = np.where(np.isin(self.spikes['clusters'], clust))[0]
+
         # Filter for nans in depths and also in amps
         self.kp_idx = np.where(~np.isnan(self.spikes['depths'][self.spike_idx]) &
                                ~np.isnan(self.spikes['amps'][self.spike_idx]))[0]
@@ -212,7 +222,10 @@ class PlotData:
                 'cluster': True
             }
 
-            p2t = self.clusters['peakToTrough'][clu]
+            #XXX: Adam
+            clu_trim = clu[clu < self.clusters['peakToTrough'].size]
+
+            p2t = self.clusters['peakToTrough'][clu_trim]
             p2t_norm, p2t_levels = self.normalise_data(p2t, lquant=0, uquant=1)
 
             # Define the p2t levels so always same colourbar across sessions

@@ -86,7 +86,8 @@ class LoadDataLocal:
         with open(Path(self.folder_path, 'xyz_picks.json'), "r") as f:
             user_picks = json.load(f)
 
-        xyz_picks = np.array(user_picks['xyz_picks']) / 1e6
+        # xyz_picks = np.array(user_picks['xyz_picks']) / 1e6
+        xyz_picks = np.array(user_picks) / 1e6
 
         return xyz_picks
 
