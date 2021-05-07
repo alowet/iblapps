@@ -1873,7 +1873,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Offline vs online mode')
-    parser.add_argument('-o', '--offline', default=False, required=False, help='Offline mode')
+    parser.add_argument('-o', '--offline', default=True, required=False, help='Offline mode')
     args = parser.parse_args()
 
     app = QtWidgets.QApplication([])
