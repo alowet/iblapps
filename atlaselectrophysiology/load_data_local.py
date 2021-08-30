@@ -6,6 +6,11 @@ import alf.io
 import glob
 import json
 
+# XXX: Adam
+import sys
+sys.path.append('/home/adam/Documents/dist-rl/code/utils')
+from db import get_db_info, create_connection
+from paths import parse_data_path
 # brain_atlas = atlas.AllenAtlas(25)
 
 
@@ -188,6 +193,15 @@ class LoadDataLocal:
         # Save the new alignment
         with open(Path(self.folder_path, 'prev_alignments.json'), "w") as f:
             json.dump(original_json, f, indent=2, separators=(',', ': '))
+
+        # XXX: Adam. update database
+        mouse_name, file_date, file_date_id = parse_data_path(self.folder_path.parent.absolute())
+        paths = get_db_info()
+        conn = create_connection(paths['db'])
+        cur = conn.cursor()
+        cur.execute('UPDATE ephys SET registered=1 WHERE name="{}" AND file_date={}'.format(mouse_name, file_date))
+        conn.commit()
+        conn.close()
 
     @staticmethod
     def create_channel_dict(brain_regions):
