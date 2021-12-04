@@ -16,7 +16,7 @@ RMS_WIN_LENGTH_SECS = 3
 WELCH_WIN_LENGTH_SAMPLES = 1024
 
 
-def rmsmap(fbin, spectra=True):
+def rmsmap(fbin, spectra=True, duration=None):
     """
     Computes RMS map in time domain and spectra for each channel of Neuropixel probe
 
@@ -28,7 +28,7 @@ def rmsmap(fbin, spectra=True):
      and frequency scales
     """
     if not isinstance(fbin, spikeglx.Reader):
-        sglx = spikeglx.Reader(fbin)
+        sglx = spikeglx.Reader(fbin, duration)
     rms_win_length_samples = 2 ** np.ceil(np.log2(sglx.fs * RMS_WIN_LENGTH_SECS))
     # the window generator will generates window indices
     wingen = dsp.WindowGenerator(ns=sglx.ns, nswin=rms_win_length_samples, overlap=0)
@@ -61,7 +61,7 @@ def rmsmap(fbin, spectra=True):
     return win
 
 
-def extract_rmsmap(fbin, out_folder=None, spectra=True):
+def extract_rmsmap(fbin, out_folder=None, spectra=True, duration=None):
     """
     Wrapper for rmsmap that outputs _ibl_ephysRmsMap and _ibl_ephysSpectra ALF files
 
@@ -73,7 +73,7 @@ def extract_rmsmap(fbin, out_folder=None, spectra=True):
     :return: None
     """
     _logger.info(f"Computing QC for {fbin}")
-    sglx = spikeglx.Reader(fbin)
+    sglx = spikeglx.Reader(fbin, duration)
     # check if output ALF files exist already:
     if out_folder is None:
         out_folder = Path(fbin).parent
@@ -83,7 +83,7 @@ def extract_rmsmap(fbin, out_folder=None, spectra=True):
     alf_object_freq = f'_iblqc_ephysSpectralDensity{sglx.type.upper()}'
 
     # crunch numbers
-    rms = rmsmap(fbin, spectra=spectra)
+    rms = rmsmap(fbin, spectra=spectra, duration=duration)
     # output ALF files, single precision with the optional label as suffix before extension
     if not out_folder.exists():
         out_folder.mkdir()
@@ -118,7 +118,7 @@ def ks2_to_alf(ks_path, bin_path, out_path, bin_file=None, ampfactor=1, label=No
     ac.convert(out_path, label=label, force=force, ampfactor=ampfactor)
 
 
-def extract_data(ks_path, ephys_path, out_path):
+def extract_data(ks_path, ephys_path, out_path, duration=None):
     efiles = spikeglx.glob_ephys_files(ephys_path)
 
     for efile in efiles:
@@ -126,7 +126,7 @@ def extract_data(ks_path, ephys_path, out_path):
             ks2_to_alf(ks_path, ephys_path, out_path, bin_file=efile.ap,
                        ampfactor=_sample2v(efile.ap), label=None, force=True)
 
-            extract_rmsmap(efile.ap, out_folder=out_path, spectra=False)
+            extract_rmsmap(efile.ap, out_folder=out_path, spectra=False, duration=duration)
         if efile.get('lf') and efile.lf.exists():
             extract_rmsmap(efile.lf, out_folder=out_path)
 
