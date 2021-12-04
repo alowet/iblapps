@@ -1,8 +1,11 @@
 from PyQt5 import QtGui, QtWidgets
 import numpy as np
 import os
-import brainbox as bb
-import alf.io as aio
+import one.alf.io as alfio
+from brainbox.processing import get_units_bunch, compute_cluster_average
+from brainbox.population.decode import xcorr
+from brainbox.singlecell import calculate_peths
+from brainbox.io.spikeglx import extract_waveforms
 from pathlib import Path
 
 
@@ -30,6 +33,7 @@ class DataGroup:
         #For autocorrolelogram
         self.autocorr_window = 0.1
         self.autocorr_bin = 0.001
+
 
         #For waveform (N.B in ms)
         self.waveform_window = 2
@@ -60,49 +64,69 @@ class DataGroup:
         except:
             self.ephys_file_path = []
 
-
     def load_data(self):
-        self.spikes = aio.load_object(self.probe_path, 'spikes')
-        self.trials = aio.load_object(self.alf_path, 'trials')
-        self.clusters = aio.load_object(self.probe_path, 'clusters')
-        self.ids = np.unique(self.spikes.clusters)
-        self.metrics = np.array(self.clusters.metrics.ks2_label[self.ids])
-        self.colours = np.array(self.clusters.metrics.ks2_label[self.ids])
+        self.spikes = alfio.load_object(self.probe_path, 'spikes')
+        self.trials = alfio.load_object(self.alf_path, 'trials')
+        self.clusters = alfio.load_object(self.probe_path, 'clusters')
+        self.prepare_data(self.spikes, self.clusters, self.trials)
+        # self.ids = np.unique(self.spikes.clusters)
+        # self.metrics = np.array(self.clusters.metrics.ks2_label[self.ids])
+        # self.colours = np.array(self.clusters.metrics.ks2_label[self.ids])
+        # self.colours[np.where(self.colours == 'mua')[0]] = QtGui.QColor('#fdc086')
+        # self.colours[np.where(self.colours == 'good')[0]] = QtGui.QColor('#7fc97f')
+    #
+    # file_count = 0
+    # if os.path.isdir(self.gui_path):
+    #    for i in os.listdir(self.gui_path):
+    #        if 'depth' in i:
+    #            self.depths = np.load(Path(self.gui_path + '/cluster_depths.npy'))
+    #            file_count += 1
+    #        elif 'amp' in i:
+    #            self.amps = np.load(Path(self.gui_path + '/cluster_amps.npy'))
+    #            file_count += 1
+    #        elif 'nspikes' in i:
+    #            self.nspikes = np.load(Path(self.gui_path + '/cluster_nspikes.npy'))
+    #            file_count += 1
+    #    if file_count != 3:
+    #        self.compute_depth_and_amplitudes()
+    # else:
+    #    os.mkdir(self.gui_path)
+    #    self.compute_depth_and_amplitudes()
+    #
+    # self.sort_by_id = np.arange(len(self.ids))
+    # self.sort_by_nspikes = np.argsort(self.nspikes)
+    # self.sort_by_nspikes = self.sort_by_nspikes[::-1]
+    # self.sort_by_good = np.append(np.where(self.metrics == 'good')[0], np.where(self.metrics == 'mua')[0])
+    # self.n_trials = len(self.trials['contrastLeft'])
+
+    def prepare_data(self, spikes, clusters, trials):
+        self.spikes = spikes
+        self.clusters = clusters
+        self.trials = trials
+        self.ids = np.unique(spikes.clusters)
+        self.metrics = np.array(clusters.metrics.ks2_label[self.ids])
+        self.colours = np.array(clusters.metrics.ks2_label[self.ids])
         self.colours[np.where(self.colours == 'mua')[0]] = QtGui.QColor('#fdc086')
         self.colours[np.where(self.colours == 'good')[0]] = QtGui.QColor('#7fc97f')
-
-        file_count = 0
-        if os.path.isdir(self.gui_path):
-            for i in os.listdir(self.gui_path):
-                if 'depth' in i:
-                    self.depths = np.load(Path(self.gui_path + '/cluster_depths.npy'))
-                    file_count += 1
-                elif 'amp' in i:
-                    self.amps = np.load(Path(self.gui_path + '/cluster_amps.npy'))
-                    file_count += 1
-                elif 'nspikes' in i:
-                    self.nspikes = np.load(Path(self.gui_path + '/cluster_nspikes.npy'))
-                    file_count += 1
-            if file_count != 3:
-                self.compute_depth_and_amplitudes()
-        else:
-            os.mkdir(self.gui_path)
-            self.compute_depth_and_amplitudes()
-
+        _, self.depths, self.nspikes = compute_cluster_average(spikes.clusters, spikes.depths)
+        _, self.amps, _ = compute_cluster_average(spikes.clusters, spikes.amps)
+        self.amps = self.amps * 1e6
         self.sort_by_id = np.arange(len(self.ids))
         self.sort_by_nspikes = np.argsort(self.nspikes)
         self.sort_by_nspikes = self.sort_by_nspikes[::-1]
-        self.sort_by_good = np.append(np.where(self.metrics == 'good')[0], np.where(self.metrics == 'mua')[0])
-        self.n_trials = len(self.trials['contrastLeft'])
+        self.sort_by_good = np.append(np.where(self.metrics == 'good')[0],
+                                      np.where(self.metrics == 'mua')[0])
+        self.n_trials = len(trials['contrastLeft'])
+
 
     def compute_depth_and_amplitudes(self):
-        units_b = bb.processing.get_units_bunch(self.spikes)
+        units_b = get_units_bunch(self.spikes)
         self.depths = []
         self.amps = []
         self.nspikes = []
         for clu in self.ids:
-            self.depths = np.append(self.depths, np.mean(units_b.depths[str(clu)]))
-            self.amps = np.append(self.amps, np.mean(units_b.amps[str(clu)]) * 1e6)
+            self.depths = np.append(self.depths, np.nanmean(units_b.depths[str(clu)]))
+            self.amps = np.append(self.amps, np.nanmean(units_b.amps[str(clu)]) * 1e6)
             self.nspikes = np.append(self.nspikes, len(units_b.amps[str(clu)]))
 
         np.save((self.gui_path + '/cluster_depths'), self.depths)
@@ -138,7 +162,7 @@ class DataGroup:
         self.n_waveform = 0
 
     def compute_peth(self, trial_type, clust, trials_id):
-        peths, bin = bb.singlecell.calculate_peths(self.spikes.times, self.spikes.clusters,
+        peths, bin = calculate_peths(self.spikes.times, self.spikes.clusters,
         [self.clust_ids[clust]], self.trials[trial_type][trials_id], self.t_before, self.t_after)
 
         peth_mean = peths.means[0, :]
@@ -148,22 +172,23 @@ class DataGroup:
         return t_peth, peth_mean, peth_std
 
     def compute_rasters(self, trial_type, clust, trials_id):
-        x = np.empty(0)
-        y = np.empty(0)
+        self.x = np.empty(0)
+        self.y = np.empty(0)
         spk_times = self.spikes.times[self.spikes.clusters == self.clust_ids[clust]]
         for idx, val in enumerate(self.trials[trial_type][trials_id]):
             spks_to_include = np.bitwise_and(spk_times >= val - self.t_before, spk_times <= val + self.t_after)
             trial_spk_times = spk_times[spks_to_include]
             trial_spk_times_aligned = trial_spk_times - val
             trial_no = (np.ones(len(trial_spk_times_aligned))) * idx * 10
-            x = np.append(x, trial_spk_times_aligned)
-            y = np.append(y, trial_no)
+            self.x = np.append(self.x, trial_spk_times_aligned)
+            self.y = np.append(self.y, trial_no)
 
-        return x, y, self.n_trials
+        return self.x, self.y, self.n_trials
 
     def compute_autocorr(self, clust):
         self.clus_idx = np.where(self.spikes.clusters == self.clust_ids[clust])[0]
-        x_corr = bb.population.xcorr(self.spikes.times[self.clus_idx], self.spikes.clusters[self.clus_idx],
+
+        x_corr = xcorr(self.spikes.times[self.clus_idx], self.spikes.clusters[self.clus_idx],
         self.autocorr_bin, self.autocorr_window)
 
         corr = x_corr[0, 0, :]
@@ -178,7 +203,7 @@ class DataGroup:
         if len(self.ephys_file_path) != 0:
             spk_times = self.spikes.times[self.clus_idx][self.spk_intervals[self.n_waveform]:self.spk_intervals[self.n_waveform + 1]]
             max_ch = self.clusters['channels'][self.clust_ids[clust]]
-            wf = bb.io.extract_waveforms(self.ephys_file_path, spk_times, max_ch, t = self.waveform_window, car = self.CAR)
+            wf = extract_waveforms(self.ephys_file_path, spk_times, max_ch, t = self.waveform_window, car = self.CAR)
             wf_mean = np.mean(wf[:,:,0], axis = 0)
             wf_std = np.std(wf[:,:,0], axis = 0)
 

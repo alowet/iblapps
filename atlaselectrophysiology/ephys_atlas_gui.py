@@ -1,3 +1,10 @@
+import os
+import platform
+
+if platform.system() == 'Darwin':
+    if platform.release().split('.')[0] == '20':
+        os.environ["QT_MAC_WANTS_LAYER"] = "1"
+
 from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 import pyqtgraph.exporters
@@ -11,23 +18,53 @@ import atlaselectrophysiology.ColorBar as cb
 import atlaselectrophysiology.ephys_gui_setup as ephys_gui
 from atlaselectrophysiology.create_overview_plots import make_overview_plot
 from pathlib import Path
-import os
+import qt
+import matplotlib.pyplot as mpl  # noqa  # This is needed to make qt show properly :/
 
 
 class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
-    def __init__(self, offline=False):
+
+    @staticmethod
+    def _instances():
+        app = QtWidgets.QApplication.instance()
+        return [w for w in app.topLevelWidgets() if isinstance(w, MainWindow)]
+
+    @staticmethod
+    def _get_or_create(title='Electrophysiology Atlas', **kwargs):
+        av = next(filter(lambda e: e.isVisible() and e.windowTitle() == title,
+                         MainWindow._instances()), None)
+        if av is None:
+            av = MainWindow(**kwargs)
+            av.setWindowTitle(title)
+        return av
+
+    def __init__(self, offline=False, probe_id=None, one=None, histology=True,
+                 spike_collection=None):
         super(MainWindow, self).__init__()
 
         self.init_variables()
         self.init_layout(self, offline=offline)
-        if not offline:
+        self.configure = True
+        if not offline and probe_id is None:
             self.loaddata = LoadData()
             self.populate_lists(self.loaddata.get_subjects(), self.subj_list, self.subj_combobox)
+            self.offline = False
+        elif not offline and probe_id is not None:
+            self.loaddata = LoadData(probe_id=probe_id, one=one, load_histology=histology,
+                                     spike_collection=spike_collection)
+            self.current_shank_idx = 0
+            _, self.histology_exists = self.loaddata.get_info(0)
+            self.feature_prev, self.track_prev = self.loaddata.get_starting_alignment(0)
+            self.data_status = False
+            self.data_button_pressed()
+            self.offline = False
         else:
             self.loaddata = LoadDataLocal()
+            self.offline = True
+            self.histology_exists = True
+
         self.allen = self.loaddata.get_allen_csv()
         self.init_region_lookup(self.allen)
-        self.configure = True
 
     def init_variables(self):
         """
@@ -70,7 +107,8 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.lines_features = np.empty((0, 3))
         self.lines_tracks = np.empty((0, 1))
         self.points = np.empty((0, 1))
-        self.scale = 1
+        self.y_scale = 1
+        self.x_scale = 1
 
         # Variables to keep track of plots and colorbars
         self.img_plots = []
@@ -114,6 +152,8 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
 
         self.track = [0] * (self.max_idx + 1)
         self.features = [0] * (self.max_idx + 1)
+
+        self.nearby = None
 
     def set_axis(self, fig, ax, show=True, label=None, pen='k', ticks=True):
         """
@@ -169,6 +209,13 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         if height:
             axis.setHeight(height)
 
+    def set_lims(self, min, max):
+        self.probe_tip = min
+        self.probe_top = max
+
+        [top_line.setY(self.probe_top) for top_line in self.probe_top_lines]
+        [tip_line.setY(self.probe_tip) for tip_line in self.probe_tip_lines]
+
     def populate_lists(self, data, list_name, combobox):
         """
         Populate drop down lists with subject/session/alignment options
@@ -188,7 +235,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         # This makes sure the drop down menu is wide enough to showw full length of string
         min_width = combobox.fontMetrics().width(max(data, key=len))
         min_width += combobox.view().autoScrollMargin()
-        min_width += combobox.style().pixelMetric(QtGui.QStyle.PM_ScrollBarExtent)
+        min_width += combobox.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
         combobox.view().setMinimumWidth(min_width)
 
         # Set the default to be the first option
@@ -321,7 +368,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.fig_line.update()
             self.fig_probe.update()
 
-    def save_plots(self):
+    def save_plots(self, save_path=None):
         """
         Saves all plots from the GUI into folder
         """
@@ -329,12 +376,15 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         try:
             sess_info = (self.loaddata.subj + '_' + str(self.loaddata.date) + '_' +
                          self.loaddata.probe_label + '_')
-            image_path_overview = self.alf_path.joinpath('GUI_plots')
+            image_path_overview = self.probe_path.joinpath('GUI_plots')
             image_path = image_path_overview.joinpath(sess_info[:-1])
         except Exception:
             sess_info = ''
-            image_path_overview = self.alf_path.joinpath('GUI_plots')
+            image_path_overview = self.probe_path.joinpath('GUI_plots')
             image_path = image_path_overview
+
+        if save_path:
+            image_path_overview = Path(save_path)
 
         os.makedirs(image_path_overview, exist_ok=True)
         os.makedirs(image_path, exist_ok=True)
@@ -342,6 +392,9 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.reset_axis_button_pressed()
         self.set_view(view=1, configure=False)
         self.remove_lines_points()
+
+        xlabel_img = self.fig_img.getAxis('bottom').label.toPlainText()
+        xlabel_line = self.fig_line.getAxis('bottom').label.toPlainText()
 
         # First go through all the image plots
         self.fig_data_layout.removeItem(self.fig_probe)
@@ -369,11 +422,13 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
                                                     self.img_options_group.checkedAction()
                                                     .text() + '.png')))
             self.toggle_plots(self.img_options_group)
+            self.remove_lines_points()
             plot = self.img_options_group.checkedAction()
 
         self.set_font(self.fig_img, 'left', ptsize=8, width=ax_width)
         self.set_font(self.fig_img, 'bottom', ptsize=8)
         self.set_font(self.fig_img_cb, 'top', ptsize=8, height=ax_height)
+        self.set_axis(self.fig_img, 'bottom', label=xlabel_img)
         self.fig_data_layout.removeItem(self.fig_img)
         self.fig_data_layout.removeItem(self.fig_img_cb)
 
@@ -401,6 +456,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.fig_probe.setFixedWidth(self.fig_probe_width + self.fig_ax_width)
         self.set_font(self.fig_probe, 'left', ptsize=8, width=ax_width)
         self.set_font(self.fig_probe_cb, 'top', ptsize=8, height=ax_height)
+        self.set_axis(self.fig_probe, 'bottom', pen='w', label='blank')
         self.fig_data_layout.removeItem(self.fig_probe)
         self.fig_data_layout.removeItem(self.fig_probe_cb)
 
@@ -430,6 +486,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.set_axis(self.fig_probe_cb, 'top', pen='k', label=text)
         self.set_font(self.fig_line, 'left', ptsize=8, width=ax_width)
         self.set_font(self.fig_line, 'bottom', ptsize=8)
+        self.set_axis(self.fig_line, 'bottom', label=xlabel_line)
         self.fig_data_layout.removeItem(self.fig_line)
         self.fig_data_layout.removeItem(self.fig_probe_cb)
         self.fig_data_area.resize(width1, height1)
@@ -438,6 +495,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.fig_data_layout.addItem(self.fig_probe, 1, 0)
         self.fig_data_layout.addItem(self.fig_line, 1, 1)
         self.fig_data_layout.addItem(self.fig_img, 1, 2)
+
         self.set_view(view=1, configure=False)
 
         # Save slice images
@@ -478,19 +536,21 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         # Save the brain regions image
         self.set_axis(self.fig_hist_extra_yaxis, 'left')
         # Add labels to show which ones are aligned
-        self.set_axis(self.fig_hist, 'bottom', label='aligned', ticks=False)
+        self.set_axis(self.fig_hist, 'bottom', label='aligned')
         self.set_font(self.fig_hist, 'bottom', ptsize=12)
-        self.set_axis(self.fig_hist_ref, 'bottom', label='original', ticks=False)
+        self.set_axis(self.fig_hist_ref, 'bottom', label='original')
         self.set_font(self.fig_hist_ref, 'bottom', ptsize=12)
         exporter = pg.exporters.ImageExporter(self.fig_hist_layout.scene())
         exporter.export(str(image_path.joinpath(sess_info + 'hist.png')))
         self.set_axis(self.fig_hist_extra_yaxis, 'left', pen=None)
         self.set_font(self.fig_hist, 'bottom', ptsize=8)
-        self.set_axis(self.fig_hist, 'bottom', pen='w')
+        self.set_axis(self.fig_hist, 'bottom', pen='w', label='blank')
         self.set_font(self.fig_hist_ref, 'bottom', ptsize=8)
-        self.set_axis(self.fig_hist_ref, 'bottom', pen='w')
+        self.set_axis(self.fig_hist_ref, 'bottom', pen='w', label='blank')
 
-        make_overview_plot(image_path, sess_info)
+        make_overview_plot(image_path, sess_info, save_folder=image_path_overview)
+
+        self.add_lines_points()
 
     def toggle_plots(self, options_group):
         """
@@ -510,7 +570,6 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
     """
     Plot functions
     """
-
     def plot_histology(self, fig, ax='left', movable=True):
         """
         Plots histology figure - brain regions that intersect with probe track
@@ -522,11 +581,16 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
                         fig_hist_ref
         :type movable: Bool
         """
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
         fig.clear()
         self.hist_regions = np.empty((0, 1))
         axis = fig.getAxis(ax)
         axis.setTicks([self.hist_data['axis_label'][self.idx]])
         axis.setZValue(10)
+        self.set_axis(self.fig_hist, 'bottom', pen='w', label='blank')
 
         # Plot each histology region
         for ir, reg in enumerate(self.hist_data['region'][self.idx]):
@@ -582,12 +646,17 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
                         fig_hist_ref
         :type movable: Bool
         """
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         fig.clear()
         self.hist_ref_regions = np.empty((0, 1))
         axis = fig.getAxis(ax)
         axis.setTicks([self.hist_data_ref['axis_label']])
         axis.setZValue(10)
-        self.set_axis(self.fig_hist_ref, 'bottom', pen='w')
+        self.set_axis(self.fig_hist_ref, 'bottom', pen='w', label='blank')
 
         # Plot each histology region
         for ir, reg in enumerate(self.hist_data_ref['region']):
@@ -624,6 +693,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
                         fig_hist_ref
         :type movable: Bool
         """
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         fig.clear()
         self.hist_ref_regions = np.empty((0, 1))
         axis = fig.getAxis(ax)
@@ -669,6 +743,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         """
         Offset location of probe tip along probe track
         """
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         self.track[self.idx] = (self.track[self.idx_prev] + self.tip_pos.value() / 1e6)
         self.features[self.idx] = (self.features[self.idx_prev])
 
@@ -682,6 +760,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         """
         Scale brain regions along probe track
         """
+
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         # Track --> histology plot
         line_track = np.array([line[0].pos().y() for line in self.lines_tracks]) / 1e6
         # Feature --> ephys data plots
@@ -717,6 +800,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Plots the scale factor applied to brain regions along probe track, displayed
         alongside histology figure
         """
+
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         self.fig_scale.clear()
         self.scale_regions = np.empty((0, 1))
         self.scale_factor = self.scale_data['scale'][self.idx]
@@ -743,6 +831,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
 
         self.fig_scale.setYRange(min=self.probe_tip - self.probe_extra,
                                  max=self.probe_top + self.probe_extra, padding=self.pad)
+        self.set_axis(self.fig_scale, 'bottom', pen='w', label='blank')
         self.fig_scale_cb.addItem(cbar)
 
     def plot_fit(self):
@@ -750,6 +839,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Plots the scale factor and offset applied to channels along depth of probe track
         relative to orignal position of channels
         """
+
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         self.fit_plot.setData(x=self.features[self.idx] * 1e6,
                               y=self.track[self.idx] * 1e6)
         self.fit_scatter.setData(x=self.features[self.idx] * 1e6,
@@ -763,24 +857,29 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.fit_plot_lin.setData()
 
     def plot_slice(self, data, img_type):
+
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         self.fig_slice.clear()
         self.slice_chns = []
         self.slice_lines = []
         img = pg.ImageItem()
         img.setImage(data[img_type])
+        transform = [data['scale'][0], 0., 0., 0., data['scale'][1], 0., data['offset'][0],
+                     data['offset'][1], 1.]
+        img.setTransform(QtGui.QTransform(*transform))
 
         if img_type == 'label':
-            img.translate(data['offset'][0], data['offset'][1])
-            img.scale(data['scale'][0], data['scale'][1])
             self.fig_slice_layout.removeItem(self.slice_item)
             self.fig_slice_layout.addItem(self.fig_slice_hist_alt, 0, 1)
             self.slice_item = self.fig_slice_hist_alt
         else:
-            img.translate(data['offset'][0], data['offset'][1])
-            img.scale(data['scale'][0], data['scale'][1])
             color_bar = cb.ColorBar('cividis')
             lut = color_bar.getColourMap()
             img.setLookupTable(lut)
+
             self.fig_slice_layout.removeItem(self.slice_item)
             self.fig_slice_hist = pg.HistogramLUTItem()
             self.fig_slice_hist.axis.hide()
@@ -803,6 +902,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.plot_channels()
 
     def plot_channels(self):
+
+        # If no histology we can't do alignment
+        if not self.histology_exists:
+            return
+
         self.channel_status = True
         self.xyz_channels = self.ephysalign.get_channel_locations(self.features[self.idx],
                                                                   self.track[self.idx])
@@ -855,9 +959,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         else:
             [self.fig_img.removeItem(plot) for plot in self.img_plots]
             [self.fig_img_cb.removeItem(cbar) for cbar in self.img_cbars]
+
             self.img_plots = []
             self.img_cbars = []
-            connect = np.zeros(data['x'].size, dtype=int)
+
             size = data['size'].tolist()
             symbol = data['symbol'].tolist()
 
@@ -869,26 +974,31 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
 
             if type(np.any(data['colours'])) == QtGui.QColor:
                 brush = data['colours'].tolist()
-            else:
-                brush = color_bar.map.mapToQColor(data['colours'])
+                plot = pg.ScatterPlotItem()
+                plot.setData(x=data['x'], y=data['y'],
+                             symbol=symbol, size=size, brush=brush, pen=data['pen'])
 
-            plot = pg.PlotDataItem()
-            plot.setData(x=data['x'], y=data['y'], connect=connect,
-                         symbol=symbol, symbolSize=size, symbolBrush=brush, symbolPen=data['pen'])
+            else:
+                brush = color_bar.getBrush(data['colours'],
+                                           levels=[data['levels'][0], data['levels'][1]])
+                plot = pg.ScatterPlotItem()
+                plot.setData(x=data['x'], y=data['y'],
+                             symbol=symbol, size=size, brush=brush, pen=data['pen'])
+
             self.fig_img.addItem(plot)
             self.fig_img.setXRange(min=data['xrange'][0], max=data['xrange'][1],
                                    padding=0)
             self.fig_img.setYRange(min=self.probe_tip - self.probe_extra,
                                    max=self.probe_top + self.probe_extra, padding=self.pad)
             self.set_axis(self.fig_img, 'bottom', label=data['xaxis'])
-            self.scale = 1
+            self.y_scale = 1
             self.img_plots.append(plot)
             self.data_plot = plot
             self.xrange = data['xrange']
 
             if data['cluster']:
                 self.data = data['x']
-                self.data_plot.sigPointsClicked.connect(self.cluster_clicked)
+                self.data_plot.sigClicked.connect(self.cluster_clicked)
 
     def plot_line(self, data):
         """
@@ -947,8 +1057,9 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             for img, scale, offset in zip(data['img'], data['scale'], data['offset']):
                 image = pg.ImageItem()
                 image.setImage(img)
-                image.translate(offset[0], offset[1])
-                image.scale(scale[0], scale[1])
+                transform = [scale[0], 0., 0., 0., scale[1], 0., offset[0],
+                             offset[1], 1.]
+                image.setTransform(QtGui.QTransform(*transform))
                 image.setLookupTable(lut)
                 image.setLevels((data['levels'][0], data['levels'][1]))
                 self.fig_probe.addItem(image)
@@ -962,6 +1073,8 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.fig_probe.setXRange(min=data['xrange'][0], max=data['xrange'][1], padding=0)
             self.fig_probe.setYRange(min=self.probe_tip - self.probe_extra,
                                      max=self.probe_top + self.probe_extra, padding=self.pad)
+            # so stupid!!!!!
+            self.set_axis(self.fig_probe, 'bottom', pen='w', label='blank')
             if bounds is not None:
                 # add some infinite line stuff
                 for bound in bounds:
@@ -995,8 +1108,9 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
 
             image = pg.ImageItem()
             image.setImage(data['img'])
-            image.translate(data['offset'][0], data['offset'][1])
-            image.scale(data['scale'][0], data['scale'][1])
+            transform = [data['scale'][0], 0., 0., 0., data['scale'][1], 0., data['offset'][0],
+                         data['offset'][1], 1.]
+            image.setTransform(QtGui.QTransform(*transform))
             cmap = data.get('cmap', [])
             if cmap:
                 color_bar = cb.ColorBar(data['cmap'])
@@ -1015,8 +1129,13 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.fig_img.setXRange(min=data['xrange'][0], max=data['xrange'][1], padding=0)
             self.fig_img.setYRange(min=self.probe_tip - self.probe_extra,
                                    max=self.probe_top + self.probe_extra, padding=self.pad)
+            # TODO need to make this work, at the moment messes things up!
+            # self.fig_img.setLimits(xMin=data['xrange'][0], xMax=data['xrange'][1])
+            #                        yMin=self.probe_tip - self.probe_extra - self.pad,
+            #                        yMax=self.probe_top + self.probe_extra + self.pad)
             self.set_axis(self.fig_img, 'bottom', label=data['xaxis'])
-            self.scale = data['scale'][1]
+            self.y_scale = data['scale'][1]
+            self.x_scale = data['scale'][0]
             self.data_plot = image
             self.xrange = data['xrange']
 
@@ -1034,10 +1153,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.sess_list.clear()
         sessions = self.loaddata.get_sessions(idx)
         self.populate_lists(sessions, self.sess_list, self.sess_combobox)
-        self.prev_alignments = self.loaddata.get_info(0)
-        self.nearby, self.dist, self.dist_mlap = self.loaddata.get_nearby_trajectories()
+        self.prev_alignments, self.histology_exists = self.loaddata.get_info(0)
         self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
         self.feature_prev, self.track_prev = self.loaddata.get_starting_alignment(0)
+        # For IBL case at the moment we only using single shank
+        self.current_shank_idx = 0
 
     def on_session_selected(self, idx):
         """
@@ -1046,8 +1166,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         :type idx: int
         """
         self.data_status = False
-        self.prev_alignments = self.loaddata.get_info(idx)
-        self.nearby, self.dist, self.dist_mlap = self.loaddata.get_nearby_trajectories()
+        self.prev_alignments, self.histology_exists = self.loaddata.get_info(idx)
         self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
         self.feature_prev, self.track_prev = self.loaddata.get_starting_alignment(0)
 
@@ -1058,7 +1177,19 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.data_status = False
         folder_path = Path(QtWidgets.QFileDialog.getExistingDirectory(None, "Select Folder"))
         self.folder_line.setText(str(folder_path))
-        self.prev_alignments = self.loaddata.get_info(folder_path)
+        self.prev_alignments, shank_options = self.loaddata.get_info(folder_path)
+        self.populate_lists(shank_options, self.shank_list, self.shank_combobox)
+        self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
+        self.on_shank_selected(0)
+
+    def on_shank_selected(self, idx):
+        """
+        Triggered in offline mode for selecting shank when using NP2.0
+        """
+        self.data_status = False
+        self.current_shank_idx = idx
+        # Update prev_alignments
+        self.prev_alignments = self.loaddata.get_previous_alignments(self.current_shank_idx)
         self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
         self.feature_prev, self.track_prev = self.loaddata.get_starting_alignment(0)
 
@@ -1070,6 +1201,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Triggered when Get Data button pressed, uses subject and session info to find eid and
         downloads and computes data needed for GUI display
         """
+
         # Clear all plots from previous session
         [self.fig_img.removeItem(plot) for plot in self.img_plots]
         [self.fig_img.removeItem(cbar) for cbar in self.img_cbars]
@@ -1078,46 +1210,55 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         [self.fig_probe.removeItem(cbar) for cbar in self.probe_cbars]
         self.fig_slice.clear()
         self.fig_hist.clear()
+        self.ax_hist.setTicks([])
         self.fig_hist_ref.clear()
+        self.ax_hist_ref.setTicks([])
         self.fig_scale.clear()
         self.fit_plot.setData()
+        self.fit_scatter.setData()
         self.remove_lines_points()
         self.init_variables()
 
         # Only run once
         if not self.data_status:
-            self.alf_path, ephys_path, self.chn_depths, self.sess_notes = self.loaddata.get_data()
-            if not self.alf_path:
+            self.probe_path, ephys_path, alf_path, self.chn_depths, self.sess_notes = \
+                self.loaddata.get_data()
+            if not self.probe_path:
                 return
+
+        # Only get histology specific stuff if the histology tracing exists
+        if self.histology_exists:
+            self.xyz_picks = self.loaddata.get_xyzpicks()
+
+            if np.any(self.feature_prev):
+                self.ephysalign = EphysAlignment(self.xyz_picks, self.chn_depths,
+                                                 track_prev=self.track_prev,
+                                                 feature_prev=self.feature_prev,
+                                                 brain_atlas=self.loaddata.brain_atlas)
             else:
-                self.xyz_picks = self.loaddata.get_xyzpicks()
+                self.ephysalign = EphysAlignment(self.xyz_picks, self.chn_depths,
+                                                 brain_atlas=self.loaddata.brain_atlas)
 
-        if np.any(self.feature_prev):
-            self.ephysalign = EphysAlignment(self.xyz_picks, self.chn_depths,
-                                             track_prev=self.track_prev,
-                                             feature_prev=self.feature_prev,
-                                             brain_atlas=self.loaddata.brain_atlas)
-        else:
-            self.ephysalign = EphysAlignment(self.xyz_picks, self.chn_depths,
-                                             brain_atlas=self.loaddata.brain_atlas)
+            self.features[self.idx], self.track[self.idx], self.xyz_track \
+                = self.ephysalign.get_track_and_feature()
 
-        self.features[self.idx], self.track[self.idx], self.xyz_track \
-            = self.ephysalign.get_track_and_feature()
+            self.hist_data['region'][self.idx], self.hist_data['axis_label'][self.idx] \
+                = self.ephysalign.scale_histology_regions(self.features[self.idx],
+                                                          self.track[self.idx])
+            self.hist_data['colour'] = self.ephysalign.region_colour
+            self.scale_data['region'][self.idx], self.scale_data['scale'][self.idx] \
+                = self.ephysalign.get_scale_factor(self.hist_data['region'][self.idx])
 
-        self.hist_data['region'][self.idx], self.hist_data['axis_label'][self.idx] \
-            = self.ephysalign.scale_histology_regions(self.features[self.idx],
-                                                      self.track[self.idx])
-        self.hist_data['colour'] = self.ephysalign.region_colour
-        self.scale_data['region'][self.idx], self.scale_data['scale'][self.idx] \
-            = self.ephysalign.get_scale_factor(self.hist_data['region'][self.idx])
+            self.hist_data_ref['region'], self.hist_data_ref['axis_label'] \
+                = self.ephysalign.scale_histology_regions(self.ephysalign.track_extent,
+                                                          self.ephysalign.track_extent)
+            self.hist_data_ref['colour'] = self.ephysalign.region_colour
 
-        self.hist_data_ref['region'], self.hist_data_ref['axis_label'] \
-            = self.ephysalign.scale_histology_regions(self.ephysalign.track_extent,
-                                                      self.ephysalign.track_extent)
-        self.hist_data_ref['colour'] = self.ephysalign.region_colour
-
+        # If we have not loaded in the data before then we load eveything we need
         if not self.data_status:
-            self.plotdata = pd.PlotData(self.alf_path, ephys_path)
+            self.plotdata = pd.PlotData(self.probe_path, ephys_path, alf_path,
+                                        self.current_shank_idx)
+            self.set_lims(np.min([0, self.plotdata.chn_min]), self.plotdata.chn_max)
             self.scat_drift_data = self.plotdata.get_depth_data_scatter()
             (self.scat_fr_data, self.scat_p2t_data,
              self.scat_amp_data) = self.plotdata.get_fr_p2t_data_scatter()
@@ -1130,11 +1271,17 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.line_fr_data, self.line_amp_data = self.plotdata.get_fr_amp_data_line()
             self.probe_rfmap, self.rfmap_boundaries = self.plotdata.get_rfmap_data()
             self.img_stim_data = self.plotdata.get_passive_events()
-            self.slice_data = self.loaddata.get_slice_images(self.ephysalign.xyz_samples)
+
+            if self.histology_exists:
+                self.slice_data = self.loaddata.get_slice_images(self.ephysalign.xyz_samples)
+            else:
+                # probably need to return an empty array of things
+                self.slice_data = {}
 
             self.data_status = True
-
             self.init_menubar()
+        else:
+            self.set_lims(np.min([0, self.plotdata.chn_min]), self.plotdata.chn_max)
 
         # Initialise checked plots
         self.img_init.setChecked(True)
@@ -1156,7 +1303,6 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.plot_scale_factor()
         if np.any(self.feature_prev):
             self.create_lines(self.feature_prev[1:-1] * 1e6)
-
         # Initialise slice and fit images
         self.plot_fit()
         self.plot_slice(self.slice_data, 'hist_rd')
@@ -1166,6 +1312,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.configure = False
 
     def compute_nearby_boundaries(self):
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         nearby_bounds = self.ephysalign.get_nearest_boundary(self.ephysalign.xyz_samples,
                                                              self.allen, steps=6,
                                                              brain_atlas=self.loaddata.brain_atlas)
@@ -1214,6 +1365,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         according to locations of reference lines on ephys and histology plots. Updates all plots
         and indices after scaling has been applied
         """
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         # Use a cyclic buffer of length self.max_idx to hold information about previous moves,
         # when a new move is initiated ensures indexes are all correct so user can only access
         # fixed number of previous or next moves
@@ -1251,6 +1407,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         has been applied
         """
 
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         if self.current_idx < self.last_idx:
             self.total_idx = np.copy(self.current_idx)
             self.diff_idx = (np.mod(self.last_idx, self.max_idx) - np.mod(self.total_idx,
@@ -1282,6 +1442,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         """
         Triggered when Shift+down key pressed. Moves probe tip down by 50um and offsets data
         """
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         if self.track[self.idx][-1] - 50 / 1e6 >= np.max(self.chn_depths) / 1e6:
             self.track[self.idx] -= 50 / 1e6
             self.offset_button_pressed()
@@ -1290,6 +1454,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         """
         Triggered when Shift+down key pressed. Moves probe tip up by 50um and offsets data
         """
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         if self.track[self.idx][0] + 50 / 1e6 <= np.min(self.chn_depths) / 1e6:
             self.track[self.idx] += 50 / 1e6
             self.offset_button_pressed()
@@ -1331,6 +1499,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         """
         Triggered when Shift+C key pressed. Shows/hides channels and trajectory on slice image
         """
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         self.channel_status = not self.channel_status
         if not self.channel_status:
             self.fig_slice.removeItem(self.traj_line)
@@ -1366,6 +1538,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
             self.points = np.delete(self.points, line_idx, axis=0)
 
     def describe_labels_pressed(self):
+
+        # if no histology don't show
+        if not self.histology_exists:
+            return
+
         if self.selected_region:
             idx = np.where(self.hist_regions == self.selected_region)[0]
             if not np.any(idx):
@@ -1417,6 +1594,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Triggered when right key pressed. Updates all plots and indices with next move. Ensures
         user cannot go past latest move
         """
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         if (self.current_idx < self.total_idx) & (self.current_idx >
                                                   self.total_idx - self.max_idx):
             self.current_idx += 1
@@ -1436,6 +1617,11 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Triggered when left key pressed. Updates all plots and indices with previous move.
         Ensures user cannot go back more than self.max_idx moves
         """
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         if self.total_idx > self.last_idx:
             self.last_idx = np.copy(self.total_idx)
 
@@ -1457,6 +1643,10 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Triggered when reset button or Shift+R key pressed. Resets channel locations to orignal
         location
         """
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         self.remove_lines_points()
         self.lines_features = np.empty((0, 3))
         self.lines_tracks = np.empty((0, 1))
@@ -1498,10 +1688,15 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         Triggered when complete button or Shift+F key pressed. Uploads final channel locations to
         Alyx
         """
-        upload = QtGui.QMessageBox.question(self, '', "Upload alignment?",
-                                            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+        # If no histology we can't upload alignment
+        if not self.histology_exists:
+            return
 
-        if upload == QtGui.QMessageBox.Yes:
+        upload = QtWidgets.QMessageBox.question(self, '', "Upload alignment?",
+                                                QtWidgets.QMessageBox.Yes |
+                                                QtWidgets.QMessageBox.No)
+
+        if upload == QtWidgets.QMessageBox.Yes:
             upload_channels = self.loaddata.upload_data(self.xyz_channels)
             self.loaddata.update_alignments(self.features[self.idx], self.track[self.idx])
             self.prev_alignments = self.loaddata.get_previous_alignments()
@@ -1511,53 +1706,71 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
 
             if upload_channels and resolved == 0:
                 # channels saved alignment not resolved
-                QtGui.QMessageBox.information(self, 'Status', ("Channels locations saved to Alyx. "
-                                                               "Alignment not resolved"))
+                QtWidgets.QMessageBox.information(self, 'Status',
+                                                  ("Channels locations saved to Alyx. "
+                                                   "Alignment not resolved"))
             if upload_channels and resolved == 1:
                 # channels saved alignment resolved, writen to flatiron
-                QtGui.QMessageBox.information(self, 'Status', ("Channel locations saved to Alyx. "
-                                                               "Alignment resolved and channels "
-                                                               "datasets written to flatiron"))
+                QtWidgets.QMessageBox.information(self, 'Status',
+                                                  ("Channel locations saved to Alyx. "
+                                                   "Alignment resolved and channels "
+                                                   "datasets written to flatiron"))
             if not upload_channels and resolved == 1:
                 # alignment already resolved, save alignment but channels not written
-                QtGui.QMessageBox.information(self,
-                                              'Status', ("Channel locations not saved to Alyx"
-                                                         " as alignment has already been "
-                                                         "resolved. New user reference lines"
-                                                         " have been saved"))
+                QtWidgets.QMessageBox.information(self, 'Status',
+                                                  ("Channel locations not saved to Alyx"
+                                                   " as alignment has already been "
+                                                   "resolved. New user reference lines"
+                                                   " have been saved"))
         else:
             pass
-            QtGui.QMessageBox.information(self, 'Status', "Channels not saved")
+            QtWidgets.QMessageBox.information(self, 'Status', "Channels not saved")
 
     def complete_button_pressed_offline(self):
         """
         Triggered when complete button or Shift+F key pressed. Uploads final channel locations to
         json file
         """
-        upload = QtGui.QMessageBox.question(self, '', "Upload alignment?",
-                                            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+        upload = QtWidgets.QMessageBox.question(self, '', "Upload alignment?",
+                                                QtWidgets.QMessageBox.Yes |
+                                                QtWidgets.QMessageBox.No)
 
-        if upload == QtGui.QMessageBox.Yes:
+        if upload == QtWidgets.QMessageBox.Yes:
             self.loaddata.upload_data(self.features[self.idx], self.track[self.idx],
                                       self.xyz_channels)
             self.prev_alignments = self.loaddata.get_previous_alignments()
             self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
             self.loaddata.get_starting_alignment(0)
-            QtGui.QMessageBox.information(self, 'Status', "Channels locations saved")
+            QtWidgets.QMessageBox.information(self, 'Status', "Channels locations saved")
         else:
             pass
-            QtGui.QMessageBox.information(self, 'Status', "Channels not saved")
+            QtWidgets.QMessageBox.warning(self, 'Status', "Channels not saved")
 
     def display_qc_options(self):
-        self.qc_dialog.exec()
+
+        # If not histology don't show
+        if not self.histology_exists:
+            return
+
+        self.qc_dialog.open()
 
     def qc_button_clicked(self):
+
+        # If no histology we can't plot histology
+        if not self.histology_exists:
+            return
+
         align_qc = self.align_qc.currentText()
         ephys_qc = self.ephys_qc.currentText()
         ephys_desc = []
         for button in self.desc_buttons.buttons():
             if button.isChecked():
                 ephys_desc.append(button.text())
+
+        if ephys_qc != 'Pass' and len(ephys_desc) == 0:
+            QtWidgets.QMessageBox.warning(self, 'Status', "You must select a reason for qc choice")
+            self.display_qc_options()
+            return
 
         self.loaddata.upload_dj(align_qc, ephys_qc, ephys_desc)
         self.complete_button_pressed()
@@ -1574,13 +1787,21 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
     def display_session_notes(self):
         self.notes_win = ephys_gui.PopupWindow(title='Session notes from Alyx', size=(200, 100),
                                                graphics=False)
-        notes = QtGui.QTextEdit()
+        notes = QtWidgets.QTextEdit()
         notes.setReadOnly(True)
-        notes.setLineWrapMode(QtGui.QTextEdit.WidgetWidth)
+        notes.setLineWrapMode(QtWidgets.QTextEdit.WidgetWidth)
         notes.setText(self.sess_notes)
         self.notes_win.layout.addWidget(notes)
 
     def display_nearby_sessions(self):
+
+        # If no histology we can't get nearby sessions
+        if not self.histology_exists:
+            return
+
+        if not self.nearby:
+            self.nearby, self.dist, self.dist_mlap = self.loaddata.get_nearby_trajectories()
+
         self.nearby_win = ephys_gui.PopupWindow(title='Nearby Sessions', size=(400, 300),
                                                 graphics=False)
 
@@ -1640,7 +1861,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         point_pos = point[0].pos()
         clust_idx = np.argwhere(self.data == point_pos.x())[0][0]
 
-        autocorr = self.plotdata.get_autocorr(clust_idx)
+        autocorr, clust_no = self.plotdata.get_autocorr(clust_idx)
         autocorr_plot = pg.PlotItem()
         autocorr_plot.setXRange(min=np.min(self.plotdata.t_autocorr),
                                 max=np.max(self.plotdata.t_autocorr))
@@ -1666,13 +1887,15 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         clust_layout.addItem(autocorr_plot, 0, 0)
         clust_layout.addItem(template_plot, 1, 0)
 
-        self.clust_win = ephys_gui.PopupWindow(title=f'Cluster {clust_idx}')
+        self.clust_win = ephys_gui.PopupWindow(title=f'Cluster {clust_no}')
         self.clust_win.closed.connect(self.popup_closed)
         self.clust_win.moved.connect(self.popup_moved)
         self.clust_win.popup_widget.addItem(autocorr_plot, 0, 0)
         self.clust_win.popup_widget.addItem(template_plot, 1, 0)
         self.cluster_popups.append(self.clust_win)
         self.activateWindow()
+
+        return clust_no
 
     def on_mouse_double_clicked(self, event):
         """
@@ -1682,21 +1905,26 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         :param event: double click event signals
         :type event: pyqtgraph mouseEvents
         """
+        # If no histology no point adding lines
+        if not self.histology_exists:
+            return
+
         if event.double():
             pos = self.data_plot.mapFromScene(event.scenePos())
             pen, brush = self.create_line_style()
-            line_track = pg.InfiniteLine(pos=pos.y() * self.scale, angle=0, pen=pen, movable=True)
+            line_track = pg.InfiniteLine(pos=pos.y() * self.y_scale, angle=0, pen=pen,
+                                         movable=True)
             line_track.sigPositionChanged.connect(self.update_lines_track)
             line_track.setZValue(100)
-            line_feature1 = pg.InfiniteLine(pos=pos.y() * self.scale, angle=0, pen=pen,
+            line_feature1 = pg.InfiniteLine(pos=pos.y() * self.y_scale, angle=0, pen=pen,
                                             movable=True)
             line_feature1.setZValue(100)
             line_feature1.sigPositionChanged.connect(self.update_lines_features)
-            line_feature2 = pg.InfiniteLine(pos=pos.y() * self.scale, angle=0, pen=pen,
+            line_feature2 = pg.InfiniteLine(pos=pos.y() * self.y_scale, angle=0, pen=pen,
                                             movable=True)
             line_feature2.setZValue(100)
             line_feature2.sigPositionChanged.connect(self.update_lines_features)
-            line_feature3 = pg.InfiniteLine(pos=pos.y() * self.scale, angle=0, pen=pen,
+            line_feature3 = pg.InfiniteLine(pos=pos.y() * self.y_scale, angle=0, pen=pen,
                                             movable=True)
             line_feature3.setZValue(100)
             line_feature3.sigPositionChanged.connect(self.update_lines_features)
@@ -1868,16 +2096,27 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.tot_idx_string.setText(f"Total Index = {self.total_idx}")
 
 
+def viewer(probe_id, one=None, histology=False, spike_collection=None, title=None):
+    """
+    """
+    qt.create_app()
+    av = MainWindow._get_or_create(probe_id=probe_id, one=one, histology=histology,
+                                   spike_collection=spike_collection, title=title)
+    av.show()
+    return av
+
+
 if __name__ == '__main__':
 
     import argparse
 
     parser = argparse.ArgumentParser(description='Offline vs online mode')
     parser.add_argument('-o', '--offline', default=True, required=False, help='Offline mode')
+    parser.add_argument('-i', '--insertion', default=None, required=False, help='Insertion mode')
     args = parser.parse_args()
 
     app = QtWidgets.QApplication([])
-    mainapp = MainWindow(offline=args.offline)
+    mainapp = MainWindow(offline=args.offline, probe_id=args.insertion)
     # mainapp = MainWindow(offline=True)
     mainapp.show()
     app.exec_()
