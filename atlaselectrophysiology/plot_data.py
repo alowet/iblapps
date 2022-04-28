@@ -64,8 +64,17 @@ class PlotData:
 
         try:
             self.clusters = alf.io.load_object(self.probe_path, 'clusters')
-            shank_spikes = np.isin(self.chn_ind_all[self.clusters.channels[self.spikes.clusters]],
-                                   self.chn_ind)
+
+            # XXX: Adam. The above does not handle new splits/merges, which creates cluster ids that exceed the number
+            # of templates. Follow the strategy from phylib.io.model
+            spike_templates = np.zeros_like(self.spikes.clusters)
+            for i in range(np.amax(self.spikes.templates)):
+                spike_ids = self.spikes.templates == i
+                spike_templates[spike_ids] = i
+            shank_spikes = np.isin(self.chn_ind_all[self.clusters.channels[spike_templates]], self.chn_ind)
+            # shank_spikes = np.isin(self.chn_ind_all[self.clusters.channels[self.spikes.clusters]],
+            #                        self.chn_ind)
+
             for key in self.spikes.keys():
                 self.spikes[key] = self.spikes[key][shank_spikes]
 
@@ -259,12 +268,11 @@ class PlotData:
             }
 
             #XXX: Adam
-            # clu_trim = clu[clu < self.clusters['peakToTrough'].size]
-            #
-            # p2t = self.clusters['peakToTrough'][clu_trim]
+            clu_trim = clu[clu < self.clusters['peakToTrough'].size]
+            p2t = self.clusters['peakToTrough'][clu_trim]
             # p2t_norm, p2t_levels = self.normalise_data(p2t, lquant=0, uquant=1)
 
-            p2t = self.clusters['peakToTrough'][clu]
+            # p2t = self.clusters['peakToTrough'][clu]
 
             # Define the p2t levels so always same colourbar across sessions
             p2t_levels = [-1.5, 1.5]

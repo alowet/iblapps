@@ -205,7 +205,7 @@ class Setup():
         # <<<<<<< HEAD
         # all_units = QtGui.QAction('All', self, checkable=True, checked=False)
         # =======
-        all_units = QtWidgets.QAction('All', self, checkable=True, checked=True)
+        all_units = QtWidgets.QAction('All', self, checkable=True, checked=False)
         # >>>>>>> upstream/develop
         all_units.triggered.connect(lambda: self.filter_unit_pressed('all'))
         good_units = QtWidgets.QAction('KS good', self, checkable=True, checked=False)
@@ -217,8 +217,8 @@ class Setup():
         # XXX: Adam
         phy_units = QtGui.QAction('Phy good', self, checkable=True, checked=True)
         phy_units.triggered.connect(lambda: self.filter_unit_pressed('Phy good'))
-        # Initialise with all units being shown
-        self.unit_init = all_units
+        # Initialise with Phy units being shown
+        self.unit_init = phy_units
 
         # Add menu bar for slice plot options
         unit_filter_options = menu_bar.addMenu("Filter Units")

@@ -17,10 +17,12 @@ import sys
 sys.path.append('/home/adam/Documents/dist-rl/code/utils')
 from db import get_db_info, create_connection
 from paths import parse_data_path
+import subprocess
+import os
 
 class LoadDataLocal:
     def __init__(self):
-        ONE(silent=True, password='international')
+        # ONE(silent=True, password='international')
         self.brain_atlas = atlas.AllenAtlas(25)
         self.folder_path = None
         self.chn_coords = None
@@ -249,7 +251,7 @@ class LoadDataLocal:
         with open(self.folder_path.joinpath(prev_align_filename), "w") as f:
             json.dump(original_json, f, indent=2, separators=(',', ': '))
 
-        # XXX: Adam. update database
+        # XXX: Adam. update database and send new alignment to cluster
         mouse_name, file_date, file_date_id = parse_data_path(self.folder_path.parent.absolute())
         paths = get_db_info()
         conn = create_connection(paths['db'])
@@ -257,6 +259,12 @@ class LoadDataLocal:
         cur.execute('UPDATE ephys SET registered=1 WHERE name="{}" AND file_date={}'.format(mouse_name, file_date))
         conn.commit()
         conn.close()
+
+        subprocess.call(['rsync', '-avx', '--progress', self.folder_path.joinpath(chan_loc_filename),
+                         'alowet@login.rc.fas.harvard.edu:' + os.path.join(paths['remote_ephys_root'], mouse_name, file_date_id)])
+        if self.n_shanks == 1 or self.shank_idx == 0:
+            subprocess.call(['rsync', '-avx', '--progress', self.folder_path.joinpath('channels.localCoordinates.npy'),
+                             'alowet@login.rc.fas.harvard.edu:' + os.path.join(paths['remote_ephys_root'], mouse_name, file_date_id)])
 
     @staticmethod
     def create_channel_dict(brain_regions):

@@ -1219,6 +1219,12 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         self.remove_lines_points()
         self.init_variables()
 
+        # # XXX: Adam
+        # self.loaddata.get_nshanks()
+        # self.current_shank_idx = 0
+        # _, self.histology_exists = self.loaddata.get_info(0)
+        # self.feature_prev, self.track_prev = self.loaddata.get_starting_alignment(0)
+
         # Only run once
         if not self.data_status:
             self.probe_path, ephys_path, alf_path, self.chn_depths, self.sess_notes = \
@@ -1699,7 +1705,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         if upload == QtWidgets.QMessageBox.Yes:
             upload_channels = self.loaddata.upload_data(self.xyz_channels)
             self.loaddata.update_alignments(self.features[self.idx], self.track[self.idx])
-            self.prev_alignments = self.loaddata.get_previous_alignments()
+            self.prev_alignments = self.loaddata.get_previous_alignments(self.current_shank_idx)  # XXX: Adam
             self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
             self.loaddata.get_starting_alignment(0)
             resolved = self.loaddata.update_qc()
@@ -1738,7 +1744,7 @@ class MainWindow(QtWidgets.QMainWindow, ephys_gui.Setup):
         if upload == QtWidgets.QMessageBox.Yes:
             self.loaddata.upload_data(self.features[self.idx], self.track[self.idx],
                                       self.xyz_channels)
-            self.prev_alignments = self.loaddata.get_previous_alignments()
+            self.prev_alignments = self.loaddata.get_previous_alignments(self.current_shank_idx)  # XXX: Adam
             self.populate_lists(self.prev_alignments, self.align_list, self.align_combobox)
             self.loaddata.get_starting_alignment(0)
             QtWidgets.QMessageBox.information(self, 'Status', "Channels locations saved")
